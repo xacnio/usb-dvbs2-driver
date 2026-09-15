@@ -1,0 +1,131 @@
+name: build
+
+# Branches other than master, and pull requests, are compiled and tested on
+# Windows (x64 and ARM64, UCRT llvm-mingw, MinGW Makefiles), Linux (x86-64
+# and ARM64) and macOS (Apple silicon), plus two variants on Linux: without
+# the card server client, and with the plain C descrambler word forced on x86.
+# A push to master is release.yml's trigger, which builds and tests the same
+# before publishing. Nothing is uploaded: a build is quick to make again.
+
+on:
+  push:
+    branches-ignore: [master]
+  pull_request:
+  workflow_dispatch:
+
+# Nothing here writes to the repository; a build only needs to read it.
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            runs_on: windows-latest
+            llvm_arch: x86_64
+            libusb_dir: MinGW64
+          - name: windows-arm64
+            runs_on: windows-11-arm
+            llvm_arch: aarch64
+            libusb_dir: MinGW-llvm-aarch64
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runs_on }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install llvm-mingw
+        run: |
+          # The progress bar costs far more time than the download itself.
+          $ProgressPreference = 'SilentlyContinue'
+          $llvmArch = '${{ matrix.llvm_arch }}'
+          $url = "https://github.com/mstorsjo/llvm-mingw/releases/download/20251021/llvm-mingw-20251021-ucrt-$llvmArch.zip"
+          Invoke-WebRequest -Uri $url -OutFile llvm-mingw.zip
+          Expand-Archive llvm-mingw.zip -DestinationPath C:\ -Force
+          "C:\llvm-mingw-20251021-ucrt-$llvmArch\bin" |
+            Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      # Only libusb.h is in the repository; on Windows the binaries come from
+      # libusb's own release. In its MinGW64 folder dll/ holds only the
+      # runtime DLL, and the import library that goes with it sits in static/.
+      - name: Fetch libusb
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          $version = '1.0.29'
+          $url = "https://github.com/libusb/libusb/releases/download/v$version/libusb-$version.7z"
+          Invoke-WebRequest -Uri $url -OutFile libusb.7z
+          7z x libusb.7z -olibusb-bin | Out-Null
+          $mingw = Join-Path 'libusb-bin' '${{ matrix.libusb_dir }}'
+          if (-not (Test-Path -LiteralPath $mingw -PathType Container)) {
+            throw "no ${{ matrix.libusb_dir }} folder in the libusb archive"
+          }
+          $lib = 'third_party/libusb/lib'
+          New-Item -ItemType Directory -Path $lib -Force | Out-Null
+          Copy-Item (Join-Path $mingw 'dll/libusb-1.0.dll')      $lib -Force
+          Copy-Item (Join-Path $mingw 'static/libusb-1.0.dll.a') $lib -Force
+          Copy-Item (Join-Path $mingw 'static/libusb-1.0.a')     $lib -Force
+          # Fail here, with the reason, rather than in CMake with a link error.
+          foreach ($file in 'libusb-1.0.dll', 'libusb-1.0.dll.a', 'libusb-1.0.a') {
+            if (-not (Test-Path (Join-Path $lib $file))) {
+              throw "$file could not be extracted from libusb"
+            }
+          }
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_COMPILER=clang -DCMAKE_MAKE_PROGRAM=mingw32-make
+
+      - name: Build
+        run: cmake --build build -j 4
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  unix:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            runs-on: ubuntu-24.04
+          - name: linux-arm64
+            runs-on: ubuntu-24.04-arm
+          - name: macos-arm64
+            runs-on: macos-14
+          - name: linux-x64-no-camd
+            runs-on: ubuntu-24.04
+            cmake-args: -DUSB_DVBS2_CAMD=OFF
+          - name: linux-x64-portable-csa
+            runs-on: ubuntu-24.04
+            cmake-args: -DUSB_DVBS2_CSA_PORTABLE=ON
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runs-on }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install libusb
+        run: |
+          if [ "$(uname)" = Darwin ]; then
+            brew install libusb pkg-config
+          else
+            sudo apt-get update
+            sudo apt-get install -y libusb-1.0-0-dev pkg-config
+          fi
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_FLAGS="-Wall -Wextra -Wno-unused-parameter -Wno-sign-compare"
+          ${{ matrix.cmake-args }}
+
+      - name: Build
+        run: cmake --build build -j 4
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure

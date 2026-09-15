@@ -1,0 +1,5 @@
+# Build trees
+**/build*/
+
+# libusb's binaries are placed by hand; see README.md
+third_party/libusb/lib/
