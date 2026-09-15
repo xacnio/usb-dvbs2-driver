@@ -1,0 +1,10 @@
+# usb-dvbs2-driver: lets the user at the seat (and members of plugdev) open
+# the receiver without root. Install and reload:
+#
+#   sudo cp 60-usb-dvbs2.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#
+# then plug the receiver in again.
+
+# UDTV receiver: IT9303 bridge, AVL6261 demodulator, RDA5815M tuner
+SUBSYSTEM=="usb", ATTRS{idVendor}=="048d", ATTRS{idProduct}=="f036", MODE="0660", GROUP="plugdev", TAG+="uaccess"
