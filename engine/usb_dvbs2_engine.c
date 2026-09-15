@@ -830,6 +830,8 @@ static int daemon_tune(uint32_t freq_khz, uint32_t sr_ksps, uint32_t lnb_v,
     avl62x1_set_tuner_i2c(&g_bridge, DEMOD_ADDR, 0);
     if (rc != 0) { error_linef("tune rc=%d\n", rc); return -1; }
 
+    if (lnb_changed && lnb_v == 0)
+        lnb_power_down();
     if (lnb_changed && lnb_v != 0)
         log_stage(94, "Switching LNB / DiSEqC");
     if (lnb_changed && lnb_v != 0) {
