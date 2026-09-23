@@ -281,9 +281,20 @@ int it9300_i2c_wr_rd(it9300 *b, uint8_t addr,
 #define FW_HDR_SIZE 7
 #define FW_MAX_DATA 58
 
+/* Every chunk below is its own round trip -- a command out, an ACK in
+ * (it9300_ctrl_msg) -- and a firmware blob is hundreds of them back to
+ * back. That steady burst can crowd out other devices' own polling on a
+ * USB controller shared with the tuner (a keyboard's, among them) for as
+ * long as the whole upload takes, which is a few seconds. A short pause
+ * every so often, not every chunk, gives the controller a moment back
+ * without meaningfully lengthening the upload itself. */
+#define FW_CHUNK_BREATHE_EVERY 8
+#define FW_CHUNK_BREATHE_MS 1
+
 static int fw_download_old(it9300 *b, const uint8_t *fw, size_t size)
 {
     size_t i = size;
+    unsigned chunk_count = 0;
     while (i > FW_HDR_SIZE) {
         const uint8_t *p = fw + (size - i);
         uint8_t  core     = p[0];
@@ -300,6 +311,9 @@ static int fw_download_old(it9300 *b, const uint8_t *fw, size_t size)
             const uint8_t *chunk = p + (FW_HDR_SIZE + data_len - j);
             ret = it9300_ctrl_msg(b, CMD_FW_DL, 0, chunk, len, NULL, 0);
             if (ret < 0) return ret;
+
+            if ((++chunk_count % FW_CHUNK_BREATHE_EVERY) == 0)
+                it9300_msleep(FW_CHUNK_BREATHE_MS);
         }
 
         ret = it9300_ctrl_msg(b, CMD_FW_DL_END, 0, NULL, 0, NULL, 0);
@@ -313,6 +327,7 @@ static int fw_download_old(it9300 *b, const uint8_t *fw, size_t size)
 static int fw_download_new(it9300 *b, const uint8_t *fw, size_t size)
 {
     size_t i_prev = 0;
+    unsigned chunk_count = 0;
     for (size_t i = FW_HDR_SIZE; i <= size; i++) {
         int boundary = (i == size) ||
             (fw[i + 0] == 0x03 &&
@@ -324,6 +339,9 @@ static int fw_download_new(it9300 *b, const uint8_t *fw, size_t size)
                                       fw + i_prev, wlen, NULL, 0);
             if (ret < 0) return ret;
             i_prev = i;
+
+            if ((++chunk_count % FW_CHUNK_BREATHE_EVERY) == 0)
+                it9300_msleep(FW_CHUNK_BREATHE_MS);
         }
     }
     return 0;

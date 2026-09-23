@@ -51,6 +51,10 @@ int avl62x1_parse_patch(const uint8_t *patch, size_t patch_size,
                         avl62x1_patch_info *info);
 int avl62x1_load_patch(it9300 *bridge, uint8_t addr,
                        const uint8_t *patch, size_t patch_size);
+
+/* Pace the short USB/I2C requests made while a receiver is cold-starting.
+ * It is deliberately off during normal tuning and signal polling. */
+void avl62x1_set_cold_init_pacing(int enabled);
 int avl62x1_wait_ready(it9300 *bridge, uint8_t addr,
                        unsigned retries, unsigned delay_ms);
 int avl62x1_get_running_version(it9300 *bridge, uint8_t addr,

@@ -704,41 +704,62 @@ static int daemon_cold_init(const dtv_hardware_profile *profile,
         error_linef("AVL6261 not found: 0x%08lx\n", (unsigned long)chip_id);
         return -1;
     }
+    /* The patch upload is only the first dense burst. The short I2C writes
+     * which immediately program clocks, tuner and DiSEqC otherwise form a
+     * second uninterrupted USB burst just before "Hardware ready". Pace the
+     * whole cold-init tail, never normal tuning or status reads. */
+    avl62x1_set_cold_init_pacing(1);
     log_stage(35, "Loading demodulator firmware");
     if (load_file_to_bridge(&g_bridge, profile->demod_firmware, 1) != 0 ||
         avl62x1_wait_ready(&g_bridge, DEMOD_ADDR, 100, 50) != 0) {
         error_linef("AVL6261 firmware failed to boot.\n");
+        avl62x1_set_cold_init_pacing(0);
         return -1;
     }
     log_stage(55, "Configuring demodulator clocks");
     rc = avl62x1_load_defaults(&g_bridge, DEMOD_ADDR, 1, 120000000u,
                                &core, &fec, &mpeg);
-    if (rc != 0 || core < 10000000u || core > 500000000u)
+    if (rc != 0 || core < 10000000u || core > 500000000u) {
+        avl62x1_set_cold_init_pacing(0);
         return -1;
+    }
     g_avl_core = core;
     rc = avl62x1_init_tuner_i2c(&g_bridge, DEMOD_ADDR, core);
     if (rc == 0) rc = avl62x1_set_tuner_i2c(&g_bridge, DEMOD_ADDR, 1);
-    if (rc != 0) return -1;
+    if (rc != 0) {
+        avl62x1_set_cold_init_pacing(0);
+        return -1;
+    }
     log_stage(70, "Starting tuner");
     rc = rda5815m_init(&g_bridge, TUNER_ADDR);
     avl62x1_set_tuner_i2c(&g_bridge, DEMOD_ADDR, 0);
-    if (rc != 0) return -1;
-    if (avl62x1_init_demod_input(&g_bridge, DEMOD_ADDR, 0) != 0)
+    if (rc != 0) {
+        avl62x1_set_cold_init_pacing(0);
         return -1;
+    }
+    if (avl62x1_init_demod_input(&g_bridge, DEMOD_ADDR, 0) != 0) {
+        avl62x1_set_cold_init_pacing(0);
+        return -1;
+    }
     {
         const avl62x1_ts_config ts_config = {
             .mode = 1, .format = 0, .clock_rising = 1, .clock_phase = 0,
             .adaptive_clock = 1, .error_inverted = 0, .valid_inverted = 0,
             .serial_data_pin = 0, .serial_msb_first = 1
         };
-        if (avl62x1_configure_ts(&g_bridge, DEMOD_ADDR, &ts_config, 1) != 0)
+        if (avl62x1_configure_ts(&g_bridge, DEMOD_ADDR, &ts_config, 1) != 0) {
+            avl62x1_set_cold_init_pacing(0);
             return -1;
+        }
     }
     log_stage(85, "Preparing LNB / DiSEqC");
-    if (avl62x1_init_diseqc(&g_bridge, DEMOD_ADDR, core) != 0)
+    if (avl62x1_init_diseqc(&g_bridge, DEMOD_ADDR, core) != 0) {
+        avl62x1_set_cold_init_pacing(0);
         return -1;
+    }
     avl62x1_set_22khz_tone(&g_bridge, DEMOD_ADDR, 0);
     avl62x1_set_lnb_voltage(&g_bridge, DEMOD_ADDR, 0);
+    avl62x1_set_cold_init_pacing(0);
     log_stage(90, "Hardware ready");
     log_line("Daemon cold-init complete.\n");
     return 0;

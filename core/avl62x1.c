@@ -130,6 +130,23 @@
  * used by the native path; the 24-bit address is advanced for every chunk. */
 #define AVL_WRITE_DATA_MAX 32u
 
+/* The AVL patch is a second firmware upload after the IT9303 bridge is up.
+ * It consists of many short I2C transactions through that same USB bridge.
+ * Keep this deliberately scoped to patch loading: signal polling and normal
+ * tuning must not acquire sleeps just because they write a register. */
+#define AVL_PATCH_BREATHE_EVERY 8u
+#define AVL_PATCH_BREATHE_MS    1u
+static int avl_patch_upload_active;
+static int avl_cold_init_pacing;
+static unsigned avl_patch_write_count;
+
+void avl62x1_set_cold_init_pacing(int enabled)
+{
+    avl_cold_init_pacing = enabled != 0;
+    if (avl_cold_init_pacing)
+        avl_patch_write_count = 0;
+}
+
 typedef struct patch_reader {
     const uint8_t *data;
     size_t size;
@@ -177,6 +194,9 @@ static int avl_write(it9300 *bridge, uint8_t addr, uint32_t reg,
         int rc = it9300_i2c_write(bridge, addr, packet, (int)chunk + 3);
         if (rc != 0)
             return rc;
+        if ((avl_patch_upload_active || avl_cold_init_pacing) &&
+            (++avl_patch_write_count % AVL_PATCH_BREATHE_EVERY) == 0)
+            dtv_sleep_ms(AVL_PATCH_BREATHE_MS);
         reg += (uint32_t)chunk;
         data += chunk;
         size -= chunk;
@@ -991,9 +1011,15 @@ int avl62x1_load_patch(it9300 *bridge, uint8_t addr,
     uint32_t variables[PATCH_VARIABLES] = { 0 };
     int rc, exit_seen = 0;
 
+    /* No other thread touches the receiver before cold init finishes. The
+     * flag therefore lets avl_write pace only this dense upload, including
+     * packed records that are otherwise individual I2C round trips. */
+    avl_patch_upload_active = 1;
+    avl_patch_write_count = 0;
+
     rc = avl62x1_parse_patch(patch, patch_size, &info);
     if (rc != 0 || info.chip_id != AVL62X1_CHIP_ID || info.minor != 8)
-        return -2;
+        { rc = -2; goto done; }
 
     reader.data = patch;
     reader.size = (size_t)info.words * 4;
@@ -1001,13 +1027,13 @@ int avl62x1_load_patch(it9300 *bridge, uint8_t addr,
     if ((rc = read_word(&reader, &reserved_words)) != 0 ||
         (rc = skip_words(&reader, reserved_words)) != 0 ||
         (rc = read_word(&reader, &script_words)) != 0)
-        return rc;
+        goto done;
 
     size_t script_start = reader.pos;
     size_t script_end = script_start + (size_t)script_words * 4;
     if (script_end > reader.size ||
         script_end != (size_t)info.data_offset_words * 4)
-        return -2;
+        { rc = -2; goto done; }
 
     unsigned command_number = 0;
     while (reader.pos < script_end && !exit_seen) {
@@ -1015,10 +1041,10 @@ int avl62x1_load_patch(it9300 *bridge, uint8_t addr,
         uint32_t record_words, condition_words, condition = 0;
         if ((rc = read_word(&reader, &record_words)) != 0 || record_words == 0 ||
             (rc = read_word(&reader, &condition_words)) != 0)
-            return -2;
+            { rc = -2; goto done; }
         size_t next_record = record_start + (size_t)record_words * 4;
         if (next_record > script_end)
-            return -2;
+            { rc = -2; goto done; }
 
         if (condition_words == 0) {
             condition = 1;
@@ -1027,22 +1053,22 @@ int avl62x1_load_patch(it9300 *bridge, uint8_t addr,
                 uint32_t operation, operand;
                 if ((rc = read_word(&reader, &operation)) != 0 ||
                     (rc = read_word(&reader, &operand)) != 0)
-                    return rc;
+                    goto done;
                 uint8_t unary = (uint8_t)(operation >> 8);
                 uint8_t binary = (uint8_t)operation;
                 uint8_t mode = (uint8_t)((operation >> 16) & 3);
                 if (mode == OP_ADDR_VARIABLE && binary != OP_STORE) {
-                    if (operand >= PATCH_VARIABLES) return -2;
+                    if (operand >= PATCH_VARIABLES) { rc = -2; goto done; }
                     operand = variables[operand];
                 }
                 if (unary == OP_UNARY_NOT) operand = !operand;
                 else if (unary == OP_UNARY_INVERT) operand = ~operand;
-                else if (unary != 0) return -2;
+                else if (unary != 0) { rc = -2; goto done; }
 
                 switch (binary) {
                 case OP_LOAD: condition = operand; break;
                 case OP_STORE:
-                    if (operand >= PATCH_VARIABLES) return -2;
+                    if (operand >= PATCH_VARIABLES) { rc = -2; goto done; }
                     variables[operand] = condition; break;
                 case OP_AND: condition = condition && operand; break;
                 case OP_OR: condition = condition || operand; break;
@@ -1050,7 +1076,7 @@ int avl62x1_load_patch(it9300 *bridge, uint8_t addr,
                 case OP_BIT_OR: condition |= operand; break;
                 case OP_EQUALS: condition = condition == operand; break;
                 case OP_NOT_EQUALS: condition = condition != operand; break;
-                default: return -2;
+                default: rc = -2; goto done;
                 }
             }
         }
@@ -1062,17 +1088,20 @@ int avl62x1_load_patch(it9300 *bridge, uint8_t addr,
 
         uint32_t command;
         if ((rc = read_word(&reader, &command)) != 0)
-            return rc;
+            goto done;
         printf("AVL62x1 patch command %u: %lu\n", command_number++,
                (unsigned long)command);
         rc = run_patch_command(bridge, addr, &reader, script_end, command,
                                info.data_offset_words, info.args_addr,
                                variables, &exit_seen);
         if (rc != 0)
-            return rc;
+            goto done;
     }
 
     /* AVL6261 S2X patches end at data_offset with no PATCH_EXIT record, so
      * reaching the validated script boundary is a success too. */
-    return reader.pos == script_end ? 0 : -2;
+    rc = reader.pos == script_end ? 0 : -2;
+done:
+    avl_patch_upload_active = 0;
+    return rc;
 }
