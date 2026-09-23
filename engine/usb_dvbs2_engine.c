@@ -947,17 +947,28 @@ static void daemon_signal_monitor(void *arg)
         if (dtv_atomic_get(&g_tuned) ? idle > 8000u
                                                        : idle > 5000u) {
             avl62x1_signal_status st;
-            int still_locked;
+            int asked_demod, carrier_gone;
             dtv_mutex_lock(&g_tune_lock);
             /* A busy host can starve these USB reads without the carrier
              * itself moving; a cheap register read tells the two apart
-             * before relighting the LNB over a carrier that never left. */
-            still_locked = dtv_atomic_get(&g_tuned) &&
+             * before relighting the LNB over a carrier that never left.
+             *
+             * That read goes over the same bus the stream is starving on, so
+             * under load it fails as readily as the stream does -- and a read
+             * that failed says nothing at all about the carrier. Only a read
+             * that came back and said "not locked" is the carrier going; a
+             * host too busy to answer is waited out, as the stream is.
+             * Relighting on a failed read cost a second of picture on every
+             * channel on screen whenever the machine was working hard. */
+            asked_demod = dtv_atomic_get(&g_tuned) &&
                           avl62x1_get_signal_status(&g_bridge, DEMOD_ADDR,
-                                                    &st) == 0 && st.locked;
-            if (still_locked) {
-                log_line("Carrier still locked; USB stream stalled, "
-                        "waiting it out.\n");
+                                                    &st) == 0;
+            carrier_gone = asked_demod ? !st.locked
+                                       : !dtv_atomic_get(&g_tuned);
+            if (!carrier_gone) {
+                log_linef("%s; USB stream stalled, waiting it out.\n",
+                          asked_demod ? "Carrier still locked"
+                                      : "The demodulator could not be asked");
             } else {
                 dtv_atomic_set(&g_lnb_relight, 1);
                 log_line("Re-acquiring the carrier.\n");
