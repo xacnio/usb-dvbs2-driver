@@ -36,10 +36,24 @@ typedef struct usb_dvbs2_engine_host {
     void (*epg_event)(const dtv_epg_event *event);
     /* A dtv_camd_state, or -1 for settings that could not be used. */
     void (*camd_state)(int state, const char *message);
+    /* The carrier is streaming but its table of programmes does not name
+     * the selected service: the channel list sent us to the wrong one, or
+     * the service has left the carrier. Once per channel. */
+    void (*service_missing)(unsigned service_id,
+                            unsigned long continuity_gaps);
     /* Packets lost before the UDP socket, per service; on a change. */
     void (*loss)(unsigned long continuity_gaps, unsigned long send_failures,
                  unsigned long overflow_packets);
 } usb_dvbs2_engine_host;
+
+/* Services carried beside the one the viewer is watching, for a window
+ * showing several channels at once. They all come off the carrier the tuner
+ * is locked to -- one tuner, one carrier -- and each goes to a UDP port of
+ * its own, the watched channel's port plus two for the first, four for the
+ * second and so on. They are filtered and nothing more: no descrambling, no
+ * teletext, no programme events, and no waiting for a clean picture, which
+ * a small tile can do without. */
+#define USB_DVBS2_MAX_EXTRA_SERVICES 9
 
 typedef struct usb_dvbs2_engine_config {
     /* "auto" or a hardware profile key. */
@@ -82,6 +96,13 @@ int usb_dvbs2_engine_tune_rf(uint32_t rf_mhz, uint32_t symbol_rate_ksps,
 /* Selects a service on the locked carrier. 0x1fff for PIDs not known: the
  * PMT and the elementary PIDs are then learned from the stream. The CA pair
  * is a hint for BISS services whose PMT names none. */
+/* One of the extra services, or none for that slot when service_id is 0.
+ * slot counts from 0 and is below USB_DVBS2_MAX_EXTRA_SERVICES. The pids may
+ * be 0x1fff: the tables on the carrier are read for whatever is missing. */
+void usb_dvbs2_engine_set_extra(unsigned slot, uint16_t service_id,
+                                uint16_t pmt_pid, uint16_t video_pid,
+                                uint16_t audio_pid);
+
 void usb_dvbs2_engine_set_channel(uint16_t service_id, uint16_t pmt_pid,
                                   uint16_t video_pid, uint16_t audio_pid,
                                   uint16_t teletext_pid,

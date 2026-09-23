@@ -84,6 +84,13 @@ static void on_camd(int state, const char *message)
     fflush(stdout);
 }
 
+static void on_service_missing(unsigned service_id,
+                               unsigned long continuity_gaps)
+{
+    printf("MISSING|%u|%lu|\n", service_id, continuity_gaps);
+    fflush(stdout);
+}
+
 static void on_loss(unsigned long continuity_gaps, unsigned long send_failures,
                     unsigned long overflow_packets)
 {
@@ -130,6 +137,22 @@ static int handle_line(char *line)
                 fields >= 6 ? (uint16_t)caid : 0,
                 fields >= 7 ? (uint16_t)capid : (uint16_t)0x1fff);
             on_log("CHANNEL applied.\n");
+        }
+    } else if (strncmp(line, "EXTRA ", 6) == 0) {
+        /* EXTRA <slot> <sid> [pmt] [video] [audio]
+         * One of the services carried beside the watched channel for a
+         * window showing several at once. A service of 0 empties the slot.
+         * They live on the carrier the tuner is already locked to. */
+        unsigned long slot = 0, sid = 0, pmt = 0x1fff, vp = 0x1fff, ap = 0x1fff;
+        int fields = sscanf(line + 6, "%lu %lu %lu %lu %lu",
+                            &slot, &sid, &pmt, &vp, &ap);
+        if (fields >= 2) {
+            usb_dvbs2_engine_set_extra(
+                (unsigned)slot, (uint16_t)sid,
+                fields >= 3 ? (uint16_t)pmt : (uint16_t)0x1fff,
+                fields >= 4 ? (uint16_t)vp : (uint16_t)0x1fff,
+                fields >= 5 ? (uint16_t)ap : (uint16_t)0x1fff);
+            on_log("EXTRA applied.\n");
         }
     } else if (strncmp(line, "CAMD ", 5) == 0) {
         /* CAMD OFF
@@ -284,6 +307,7 @@ int main(int argc, char **argv)
     host.service_teletext = on_teletext;
     host.epg_event = on_epg;
     host.camd_state = on_camd;
+    host.service_missing = on_service_missing;
     host.loss = on_loss;
     memset(&config, 0, sizeof(config));
     config.profile_key = profile_key;

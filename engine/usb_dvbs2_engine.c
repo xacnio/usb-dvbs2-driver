@@ -228,6 +228,19 @@ static uint16_t g_ttxpid;
 /* Scanner CA hint, a fallback for BISS services whose live PMT omits the
  * CA descriptor. Ordinary CA systems still need a live ECM pid. */
 static uint16_t g_hint_ca_system_id, g_hint_ca_pid;
+/* The extra services a several-channel window asks for, beside the watched
+ * one. Written by the command thread under g_lock and read by the stream
+ * thread; the epoch tells that thread when a slot has changed under it. */
+typedef struct extra_wanted {
+    uint16_t service_id;
+    uint16_t pmt_pid;
+    uint16_t video_pid;
+    uint16_t audio_pid;
+} extra_wanted;
+
+static extra_wanted g_extra[USB_DVBS2_MAX_EXTRA_SERVICES];
+static dtv_atomic32 g_extra_epoch;
+
 /* active transponder (written by the command thread only) */
 static uint32_t g_freq_khz, g_sr_ksps, g_lnb_v, g_tone, g_diseqc;
 /* DiSEqC 1.1 uncommitted port, tone burst (0 none, 1 A, 2 B) and repeat
@@ -251,6 +264,25 @@ static void log_linef(const char *format, ...)
     vsnprintf(buffer, sizeof(buffer), format, args);
     va_end(args);
     log_line(buffer);
+}
+
+/* Said once per channel when the list the service came from names a pid
+ * the table does not; what follows is the table's, so this is the line
+ * that explains a channel whose sound or picture only works here. */
+static void log_pid_disagreement(const char *what, uint16_t service,
+                                 uint16_t listed, uint16_t table)
+{
+    char a[16], b[16];
+    if (listed >= 0x1fffu)
+        snprintf(a, sizeof(a), "none");
+    else
+        snprintf(a, sizeof(a), "%u", (unsigned)listed);
+    if (table >= 0x1fffu)
+        snprintf(b, sizeof(b), "none");
+    else
+        snprintf(b, sizeof(b), "%u", (unsigned)table);
+    log_linef("Service %u: the channel list says %s pid %s, the PMT says "
+              "%s; the PMT is used.\n", (unsigned)service, what, a, b);
 }
 
 static void error_linef(const char *format, ...)
@@ -981,11 +1013,105 @@ static void daemon_signal_monitor(void *arg)
     }
 }
 
+/* One extra service on its way out: what the tables said about it and the
+ * socket it goes to. Far less than the watched channel keeps -- there is no
+ * card, no teletext page and no picture to hold back on a tile. */
+typedef struct extra_out {
+    uint16_t service_id;
+    uint16_t pmt;
+    uint16_t vpid;
+    uint16_t apid;
+    uint16_t pcr_pid;
+    uint8_t pat_cc, pmt_cc;
+    uint16_t ttxpid;
+    uint16_t stream_pids[UDP_TS_MAX_PROGRAM_PIDS];
+    size_t stream_pid_count;
+    psi_section_assembler pat_asm, pmt_asm;
+    udp_ts_writer writer;
+} extra_out;
+
+/* Picks up what the command thread last asked for, and starts the slot over
+ * where that is a different service. */
+static void extra_refresh(extra_out *out, unsigned slot)
+{
+    extra_wanted wanted;
+    dtv_mutex_lock(&g_lock);
+    wanted = g_extra[slot];
+    dtv_mutex_unlock(&g_lock);
+
+    if (wanted.service_id == out->service_id) {
+        /* The same service, but its pids may have been filled in since. */
+        if (out->pmt >= 0x1fffu)
+            out->pmt = wanted.pmt_pid;
+        return;
+    }
+
+    out->service_id = wanted.service_id;
+    out->pmt = wanted.pmt_pid;
+    out->vpid = wanted.video_pid;
+    out->apid = wanted.audio_pid;
+    out->pcr_pid = 0x1fff;
+    out->ttxpid = 0x1fff;
+    out->pat_cc = out->pmt_cc = 0;
+    out->stream_pid_count = 0;
+    out->pat_asm.length = out->pat_asm.expected = 0;
+    out->pmt_asm.length = out->pmt_asm.expected = 0;
+    out->writer.size = 0;
+}
+
+/* One packet offered to one extra service. The tables are rebuilt as they
+ * are for the watched channel, so the player sees a stream carrying that one
+ * programme and nothing else. */
+static void extra_feed(extra_out *out, const uint8_t *pk, uint16_t pid)
+{
+    const uint8_t *sec;
+    size_t ss;
+
+    if (out->service_id == 0)
+        return;
+
+    if (pid == 0) {
+        if (!psi_assemble(&out->pat_asm, pk, &sec, &ss))
+            return;
+        if (out->pmt >= 0x1fffu)
+            out->pmt = pat_lookup_pmt_pid(sec, ss, out->service_id);
+        if (out->pmt < 0x1fffu)
+            udp_ts_send_single_pat(&out->writer, sec, ss, out->service_id,
+                                   out->pmt, &out->pat_cc);
+        return;
+    }
+
+    if (pid == out->pmt && out->pmt < 0x1fffu) {
+        if (!psi_assemble(&out->pmt_asm, pk, &sec, &ss))
+            return;
+        /* Told to keep the CA descriptors: nothing here is descrambled, so a
+         * table saying the programme is in the clear would be a lie. */
+        udp_ts_send_selected_pmt(&out->writer, sec, ss, out->pmt,
+                                 out->service_id, &out->ttxpid, &out->pcr_pid,
+                                 out->stream_pids, UDP_TS_MAX_PROGRAM_PIDS,
+                                 &out->stream_pid_count, &out->pmt_cc, 0);
+        return;
+    }
+
+    if (out->stream_pid_count == 0)
+        return;
+
+    if (udp_ts_pid_in_list(pid, out->stream_pids, out->stream_pid_count) ||
+        (pid == out->pcr_pid && out->pcr_pid < 0x1fffu))
+        udp_ts_send_packet(&out->writer, pk);
+}
+
 /* TS stream thread: filters the active PIDs, switched instantly by CHANNEL. */
 static void daemon_stream_thread(void *arg)
 {
     dtv_socket sock = DTV_INVALID_SOCKET;
     udp_ts_writer writer;
+    /* The services a several-channel window asks for beside this one, each
+     * on a port of its own. Empty and costing nothing until one is asked
+     * for. */
+    extra_out extras[USB_DVBS2_MAX_EXTRA_SERVICES];
+    int32_t extra_epoch = -1;
+    unsigned extra_index;
     uint8_t buffer[65424 + 5 * 188];
     size_t pending = 0;
     /* Transfers stay queued in the driver at all times, so descrambling,
@@ -1036,6 +1162,14 @@ static void daemon_stream_thread(void *arg)
      * (1500 ms was tried) gives up before the picture was due. Still under
      * the 3000 ms vlc_wait_first_frame() allows for a first frame. */
 #define TS_RAI_WAIT_MS  2000
+    /* How long the carrier may stream without its tables naming the chosen
+     * service before it is called missing. The PAT comes round several
+     * times a second and a long one is split over a few sections, so this
+     * is many times what an answer needs; it only has to be shorter than
+     * the reader's patience with a black screen. */
+#define TS_SERVICE_WAIT_MS 5000
+    uint32_t service_wait_start = 0;
+    int service_missing_said = 0;
     uint8_t pat_cc = 0, pmt_cc = 0;
     uint16_t pcr_pid = 0x1fff;
     uint16_t ttxpid = 0x1fff;
@@ -1045,7 +1179,11 @@ static void daemon_stream_thread(void *arg)
     /* TKGS channels carry no PMT pid; it is recovered from the PAT and
      * cached until the channel changes. */
     uint16_t learned_pmt = 0x1fff;
+    /* What the service's own PMT says its video and audio pids are, and
+     * whether it has been read yet. Until it has, the pids the channel
+     * list gave are what the filter runs on. */
     uint16_t learned_vpid = 0x1fff, learned_apid = 0x1fff;
+    int table_pids = 0;
     uint16_t stream_pids[UDP_TS_MAX_PROGRAM_PIDS];
     size_t stream_pid_count = 0;
     int reported_ca = -1;
@@ -1092,6 +1230,18 @@ static void daemon_stream_thread(void *arg)
     writer.destination_alt = writer.destination;
     writer.destination_alt.sin_port = htons((uint16_t)(g_udp_port + 1u));
     writer.has_alt = 1;
+
+    memset(extras, 0, sizeof(extras));
+    for (extra_index = 0; extra_index < USB_DVBS2_MAX_EXTRA_SERVICES;
+         ++extra_index) {
+        extras[extra_index].pmt = 0x1fff;
+        extras[extra_index].pcr_pid = 0x1fff;
+        extras[extra_index].ttxpid = 0x1fff;
+        extras[extra_index].writer.socket_handle = sock;
+        extras[extra_index].writer.destination = writer.destination;
+        extras[extra_index].writer.destination.sin_port =
+            htons((uint16_t)(g_udp_port + 2u * (extra_index + 1u)));
+    }
 
     stream_rc = dtv_usb_stream_open(g_usb, DTV_EP_TS_IN, 24, 32u * 1024u,
                                     4u * 1024u * 1024u, &stream);
@@ -1156,6 +1306,11 @@ static void daemon_stream_thread(void *arg)
             dtv_usb_stream_stats(stream, &ring_dropped, NULL);
             learned_pmt = 0x1fff;
             learned_vpid = learned_apid = 0x1fff;
+            table_pids = 0;
+            /* A zap inside one carrier never flushes, so the wait starts
+             * here as well as with the first data after a tune. */
+            service_wait_start = dtv_tick32();
+            service_missing_said = 0;
             learned_ttx = 0x1fff;
             stream_pid_count = 0;
             reported_ca = -1;
@@ -1178,6 +1333,25 @@ static void daemon_stream_thread(void *arg)
          * teletext pid in the filter. */
         if (ttxpid >= 0x1fffu)
             ttxpid = learned_ttx;
+        /* The service's own table decides which pids carry it; the channel
+         * list only fills in until that table arrives. An operator list is
+         * years out of date in places, and a wrong video pid is worse than
+         * no pid at all: it holds the real sound behind the gate the
+         * picture waits at, and it lets a neighbouring service's packets
+         * through as though they were this one's. Read once per channel
+         * below and kept here, because these are read afresh every time
+         * round. */
+        if (table_pids) {
+            vpid = learned_vpid;
+            apid = learned_apid;
+        }
+        /* A slot whose channel has changed starts its tables over. */
+        if (dtv_atomic_get(&g_extra_epoch) != extra_epoch) {
+            extra_epoch = dtv_atomic_get(&g_extra_epoch);
+            for (extra_index = 0; extra_index < USB_DVBS2_MAX_EXTRA_SERVICES;
+                 ++extra_index)
+                extra_refresh(&extras[extra_index], extra_index);
+        }
         n = stream ? dtv_usb_stream_read(stream, buffer + pending, 65424, 200)
                    : dtv_usb_bulk_in(g_usb, DTV_EP_TS_IN, buffer + pending,
                                      65424, 200);
@@ -1221,11 +1395,32 @@ static void daemon_stream_thread(void *arg)
             flush_until = 0;
             video_open = 0;
             video_wait_start = dtv_tick32();
+            service_wait_start = video_wait_start;
         }
         /* A timer never started can never expire, which would hold video
          * for good on a broadcast that sets no random access indicator. */
         if (!video_open && !video_wait_start)
             video_wait_start = dtv_tick32();
+        /* The carrier is streaming and still nothing of this service has
+         * been found in its tables: neither the programme table that gives
+         * its own table's pid, nor, after that, any stream of its own. The
+         * channel list sent the receiver to the wrong carrier, or the
+         * service has left it. Either way nothing will ever arrive, and a
+         * reader left in front of a black picture deserves to be told
+         * rather than to wait it out. */
+        if (!service_missing_said && svc != 0 && service_wait_start &&
+            (pmt >= 0x1fffu || stream_pid_count == 0) &&
+            dtv_tick32() - service_wait_start > TS_SERVICE_WAIT_MS) {
+            service_missing_said = 1;
+            log_linef("Service %u: this carrier's tables %s (%lu "
+                      "continuity gaps meanwhile); nothing of it can be "
+                      "played.\n", (unsigned)svc,
+                      pmt >= 0x1fffu ? "do not name it"
+                                     : "name it but give it no streams",
+                      cc_errors);
+            if (g_host.service_missing)
+                g_host.service_missing(svc, cc_errors);
+        }
         available = pending + (size_t)n;
         /* Filter whenever the service id is known: the PMT pid comes from
          * the PAT and the elementary pids from the PMT. Requiring them up
@@ -1321,6 +1516,9 @@ static void daemon_stream_thread(void *arg)
                 pos += 188;
                 continue;
             }
+            for (extra_index = 0; extra_index < USB_DVBS2_MAX_EXTRA_SERVICES;
+                 ++extra_index)
+                extra_feed(&extras[extra_index], pk, pid);
             if (pid == 0x0012u)
                 metadata_feed_packet(pid, &g_eit_assembler, pk);
             else if (pid == 0x0014u)
@@ -1342,14 +1540,34 @@ static void daemon_stream_thread(void *arg)
                 } else if (pid == pmt && pmt < 0x1fffu) {
                     const uint8_t *sec; size_t ss;
                     if (psi_assemble(&pmt_asm, pk, &sec, &ss)) {
-                        /* Learn the PIDs from the PMT when unknown. */
-                        if (vpid >= 0x1fffu || apid >= 0x1fffu)
-                            pmt_lookup_stream_pids(sec, ss, svc,
-                                                   vpid >= 0x1fffu ? &vpid : NULL,
-                                                   apid >= 0x1fffu ? &apid : NULL);
-                        if (learned_vpid != vpid || learned_apid != apid) {
-                            learned_vpid = vpid;
-                            learned_apid = apid;
+                        /* The pids this service really uses. Taken from
+                         * the table whatever the channel list claimed, and
+                         * a service the table gives no video for is sound
+                         * only however it was listed -- keeping a video pid
+                         * on one of those would hold its sound for the two
+                         * seconds the picture is waited for, every time. */
+                        if (ss >= 16u && sec[0] == 0x02u &&
+                            (uint16_t)((sec[3] << 8) | sec[4]) == svc) {
+                            uint16_t table_vpid = 0x1fff;
+                            uint16_t table_apid = 0x1fff;
+                            pmt_lookup_stream_pids(sec, ss, svc, &table_vpid,
+                                                   &table_apid);
+                            if (!table_pids) {
+                                if (vpid != table_vpid)
+                                    log_pid_disagreement("video", svc, vpid,
+                                                         table_vpid);
+                                if (apid != table_apid)
+                                    log_pid_disagreement("audio", svc, apid,
+                                                         table_apid);
+                            }
+                            if (!table_pids || table_vpid != learned_vpid ||
+                                table_apid != learned_apid) {
+                                table_pids = 1;
+                                learned_vpid = table_vpid;
+                                learned_apid = table_apid;
+                                vpid = table_vpid;
+                                apid = table_apid;
+                            }
                             if (pcr_pid >= 0x1fffu)
                                 pcr_pid = vpid;
                         }
@@ -1426,12 +1644,13 @@ static void daemon_stream_thread(void *arg)
                                 g_host.service_teletext(svc, ttxpid);
                         }
                     }
-                } else if (udp_ts_pid_in_list(pid, stream_pids,
-                                              stream_pid_count) ||
-                           (pid == vpid && vpid < 0x1fffu) ||
-                           (pid == apid && apid < 0x1fffu) ||
-                           (pid == ttxpid && ttxpid < 0x1fffu) ||
-                           (pid == pcr_pid && pcr_pid < 0x1fffu)) {
+                } else if (stream_pid_count != 0 &&
+                           (udp_ts_pid_in_list(pid, stream_pids,
+                                               stream_pid_count) ||
+                            (pid == vpid && vpid < 0x1fffu) ||
+                            (pid == apid && apid < 0x1fffu) ||
+                            (pid == ttxpid && ttxpid < 0x1fffu) ||
+                            (pid == pcr_pid && pcr_pid < 0x1fffu))) {
                     /* Video waits for a picture it can start from;
                      * audio, teletext and tables go straight through so the
                      * service is ready when the picture opens. The random
@@ -1561,6 +1780,9 @@ static void daemon_stream_thread(void *arg)
         if (pending > sizeof(buffer) - 65424u) { pending = 0; synced = 0; }
     }
     udp_ts_flush(&writer);
+    for (extra_index = 0; extra_index < USB_DVBS2_MAX_EXTRA_SERVICES;
+         ++extra_index)
+        udp_ts_flush(&extras[extra_index].writer);
     dtv_usb_stream_close(stream);
     dtv_socket_close(sock);
     dtv_net_cleanup();
@@ -1730,6 +1952,24 @@ void usb_dvbs2_engine_set_channel(uint16_t service_id, uint16_t pmt_pid,
 {
     set_channel(service_id, pmt_pid, video_pid, audio_pid, teletext_pid,
                 ca_system_id, ca_pid);
+}
+
+void usb_dvbs2_engine_set_extra(unsigned slot, uint16_t service_id,
+                                uint16_t pmt_pid, uint16_t video_pid,
+                                uint16_t audio_pid)
+{
+    if (slot >= USB_DVBS2_MAX_EXTRA_SERVICES)
+        return;
+
+    dtv_mutex_lock(&g_lock);
+    g_extra[slot].service_id = service_id;
+    g_extra[slot].pmt_pid = pmt_pid;
+    g_extra[slot].video_pid = video_pid;
+    g_extra[slot].audio_pid = audio_pid;
+    dtv_mutex_unlock(&g_lock);
+    dtv_atomic_inc(&g_extra_epoch);
+    log_linef("Extra service %u on slot %u (port %u).\n",
+              (unsigned)service_id, slot, g_udp_port + 2u * (slot + 1u));
 }
 
 void usb_dvbs2_engine_set_camd(const dtv_camd_config *config)

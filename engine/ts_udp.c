@@ -193,6 +193,13 @@ int udp_ts_send_selected_pmt(udp_ts_writer *writer,
                                     int strip_ca)
 {
     uint8_t section[1024];
+    /* The pids are gathered here and handed over only once the whole table has
+     * been read and sent. Written straight into the caller's list, a table too
+     * long for the section buffer left it holding half a service -- and the
+     * caller forwards nothing but what is in that list, so half a service is
+     * worse than the last good one. */
+    uint16_t found[UDP_TS_MAX_PROGRAM_PIDS];
+    size_t found_count = 0;
     size_t program_info_size, source_pos, source_end, output_pos;
     uint32_t crc;
     uint16_t source_service;
@@ -203,7 +210,8 @@ int udp_ts_send_selected_pmt(udp_ts_writer *writer,
         return -1;
     if (!teletext_pid || !pcr_pid || !stream_pids || !stream_count)
         return -1;
-    *stream_count = 0;
+    if (stream_capacity > UDP_TS_MAX_PROGRAM_PIDS)
+        stream_capacity = UDP_TS_MAX_PROGRAM_PIDS;
     program_info_size = ((size_t)(source[10] & 0x0fu) << 8) | source[11];
     source_pos = 12u + program_info_size;
     source_end = source_size - 4u;
@@ -264,8 +272,8 @@ int udp_ts_send_selected_pmt(udp_ts_writer *writer,
                 d += 2u + d_len;
             }
         }
-        if (*stream_count < stream_capacity)
-            stream_pids[(*stream_count)++] = pid;
+        if (found_count < stream_capacity)
+            found[found_count++] = pid;
         if (output_pos + entry_size + 4u > sizeof(section))
             return -1;
         if (strip_ca) {
@@ -308,6 +316,9 @@ int udp_ts_send_selected_pmt(udp_ts_writer *writer,
     section[output_pos++] = (uint8_t)(crc >> 16);
     section[output_pos++] = (uint8_t)(crc >> 8);
     section[output_pos++] = (uint8_t)crc;
+    /* The table is whole: these are the service's pids from now on. */
+    memcpy(stream_pids, found, found_count * sizeof(found[0]));
+    *stream_count = found_count;
     return udp_ts_send_section(writer, pmt_pid, continuity_counter,
                                section, output_pos);
 }
