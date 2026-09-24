@@ -330,9 +330,12 @@ int dtv_usb_stream_open(dtv_usb *u, uint8_t ep, unsigned transfers,
         libusb_fill_bulk_transfer(transfer, u->h, ep, buffer,
                                   (int)chunk_bytes, stream_complete, s,
                                   STREAM_TRANSFER_TIMEOUT_MS);
-        /* The buffer belongs to the transfer from here on, so teardown has
-         * one thing to track instead of two. */
-        transfer->flags = LIBUSB_TRANSFER_FREE_BUFFER;
+        /* The buffer stays this module's own, freed here and not by
+         * libusb (no LIBUSB_TRANSFER_FREE_BUFFER): libusb-1.0.dll is built
+         * against msvcrt.dll and this program against the UCRT, so a block
+         * one runtime allocated and the other freed is heap corruption --
+         * the daemon died with 0xc0000374 in libusb_free_transfer every
+         * time it closed its stream. */
         s->transfers[i] = transfer;
         if (libusb_submit_transfer(transfer) != 0)
             break;
@@ -435,9 +438,13 @@ void dtv_usb_stream_close(dtv_usb_stream *s)
                                                    NULL);
         }
     }
-    for (i = 0; i < s->transfer_count; ++i)
-        if (s->transfers[i])
+    for (i = 0; i < s->transfer_count; ++i) {
+        if (s->transfers[i]) {
+            uint8_t *buffer = s->transfers[i]->buffer;
             libusb_free_transfer(s->transfers[i]);
+            free(buffer);
+        }
+    }
     dtv_cond_destroy(&s->data_ready);
     dtv_mutex_destroy(&s->lock);
     free(s->transfers);
