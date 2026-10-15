@@ -5,12 +5,17 @@
 #include "dtv_sha256.h"
 
 typedef struct firmware_identity {
+    dtv_firmware_kind kind;
     size_t size;
     uint8_t sha256[32];
 } firmware_identity;
 
+/* Every file a hardware profile names, as its vendor's application ships
+ * it. */
 static const firmware_identity g_firmware_identities[] = {
     {
+        /* hiremco-it9303.fw */
+        DTV_FIRMWARE_IT9303,
         6498,
         { 0xe4, 0xe9, 0x46, 0x33, 0xb4, 0xac, 0x47, 0xc6,
           0xbb, 0xa5, 0xab, 0x90, 0xee, 0xdd, 0x4a, 0x7e,
@@ -18,26 +23,54 @@ static const firmware_identity g_firmware_identities[] = {
           0x91, 0x74, 0x9c, 0x74, 0x64, 0x70, 0x4a, 0x70 }
     },
     {
+        /* hiremco-avl62x1.fw */
+        DTV_FIRMWARE_AVL62X1,
         48960,
         { 0xc4, 0xde, 0x37, 0x7b, 0xd7, 0xec, 0x17, 0xfb,
           0x8d, 0x83, 0x24, 0x50, 0xfa, 0xfe, 0x99, 0x9c,
           0xc4, 0x14, 0xe0, 0xf1, 0xd5, 0x44, 0xdd, 0x4c,
           0x98, 0x0b, 0x3e, 0xee, 0x48, 0x67, 0x98, 0x58 }
+    },
+    {
+        /* kanky-it9303.fw */
+        DTV_FIRMWARE_IT9303,
+        7013,
+        { 0x29, 0x4a, 0x1d, 0x67, 0x3a, 0x9d, 0x6e, 0x8b,
+          0x48, 0xa6, 0xa4, 0x6c, 0x51, 0xda, 0x72, 0x7a,
+          0x9f, 0x23, 0xdf, 0x5d, 0x5c, 0xe6, 0xeb, 0x24,
+          0x95, 0x73, 0x2f, 0x19, 0x46, 0x26, 0x98, 0xfa }
+    },
+    {
+        /* kanky-avl62x1.fw */
+        DTV_FIRMWARE_AVL62X1,
+        49636,
+        { 0x43, 0x73, 0xf3, 0x91, 0xa5, 0x33, 0xa3, 0x73,
+          0x5f, 0x11, 0xec, 0x20, 0xe0, 0x06, 0x7d, 0x4a,
+          0x1c, 0x18, 0x50, 0x19, 0x17, 0x10, 0xd7, 0x0d,
+          0x2d, 0x74, 0x1e, 0xa4, 0xb4, 0x98, 0xe8, 0xd3 }
     }
 };
 
 int dtv_firmware_verify(dtv_firmware_kind kind, const uint8_t *data,
                         size_t size)
 {
-    const firmware_identity *identity;
     uint8_t digest[32];
+    int hashed = 0;
+    size_t i;
 
-    if ((unsigned)kind >= sizeof(g_firmware_identities) /
-                          sizeof(g_firmware_identities[0]) || !data)
+    if (!data)
         return -1;
-    identity = &g_firmware_identities[kind];
-    if (size != identity->size)
-        return -1;
-    dtv_sha256(data, size, digest);
-    return memcmp(digest, identity->sha256, sizeof(digest)) == 0 ? 0 : -1;
+    for (i = 0; i < sizeof(g_firmware_identities) /
+                    sizeof(g_firmware_identities[0]); ++i) {
+        const firmware_identity *identity = &g_firmware_identities[i];
+        if (identity->kind != kind || size != identity->size)
+            continue;
+        if (!hashed) {
+            dtv_sha256(data, size, digest);
+            hashed = 1;
+        }
+        if (memcmp(digest, identity->sha256, sizeof(digest)) == 0)
+            return 0;
+    }
+    return -1;
 }

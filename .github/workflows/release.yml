@@ -110,6 +110,8 @@ jobs:
           foreach ($file in 'bin/usb-dvbs2-daemon.exe', 'bin/usb-dvbs2.exe',
                             'bin/libusb-1.0.dll', 'bin/firmware/hiremco-it9303.fw',
                             'bin/firmware/hiremco-avl62x1.fw',
+                            'bin/firmware/kanky-it9303.fw',
+                            'bin/firmware/kanky-avl62x1.fw',
                             'include/sdk/usb_dvbs2.h',
                             'include/engine/usb_dvbs2_engine.h',
                             'lib/libusbdvbs2engine.a', 'lib/libusbdvbs2client.a') {
@@ -165,6 +167,7 @@ jobs:
           cmake --install build --prefix "$name"
           for file in bin/usb-dvbs2-daemon bin/usb-dvbs2 \
                       bin/firmware/hiremco-it9303.fw bin/firmware/hiremco-avl62x1.fw \
+                      bin/firmware/kanky-it9303.fw bin/firmware/kanky-avl62x1.fw \
                       include/sdk/usb_dvbs2.h include/engine/usb_dvbs2_engine.h \
                       lib/libusbdvbs2engine.a lib/libusbdvbs2client.a; do
             if [ ! -e "$name/$file" ]; then echo "the package has no $file"; exit 1; fi

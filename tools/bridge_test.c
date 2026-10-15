@@ -6,40 +6,23 @@
  * 4) Report the firmware version and the chip id
  *
  * Usage: usb-dvbs2-bridge-test [--force] [firmware.fw]
- *   Without a firmware path the Hiremco firmware extracted from the APK is
- *   tried. --force reloads the RAM firmware even when one is running. */
+ *   Without a firmware path the bridge firmware of the receiver's hardware
+ *   profile is used. --force reloads the RAM firmware even when one is
+ *   running. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "dtv_platform.h"
 #include "usb_backend.h"
 #include "it9300.h"
 #include "firmware_verify.h"
-
-#define UDTV_VID 0x048D
-#define UDTV_PID 0xF036
-#define DEFAULT_FW "../firmware/hiremco-it9303.fw"
-
-static uint8_t *read_file(const char *path, size_t *out_size)
-{
-    FILE *f = fopen(path, "rb");
-    if (!f)
-        return NULL;
-    fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (sz <= 0) { fclose(f); return NULL; }
-    uint8_t *buf = malloc(sz);
-    if (!buf) { fclose(f); return NULL; }
-    size_t rd = fread(buf, 1, sz, f);
-    fclose(f);
-    if (rd != (size_t)sz) { free(buf); return NULL; }
-    *out_size = (size_t)sz;
-    return buf;
-}
+#include "tool_util.h"
 
 int main(int argc, char **argv)
 {
-    const char *fw_path = DEFAULT_FW;
+    const dtv_hardware_profile *profile;
+    const char *fw_path = NULL;
+    char fw_resolved[DTV_PATH_MAX];
     int force = 0;
     int fw_path_set = 0;
     dtv_usb *usb = NULL;
@@ -58,14 +41,12 @@ int main(int argc, char **argv)
         }
     }
 
-    r = dtv_usb_open(&usb, UDTV_VID, UDTV_PID);
-    if (r != 0) {
-        fprintf(stderr, "[ERROR] Device could not be opened: %s\n"
-                        "  Was the WinUSB driver assigned with Zadig? (VID:PID %04x:%04x)\n",
-                dtv_usb_strerror(r), UDTV_VID, UDTV_PID);
+    profile = open_connected_device(&usb);
+    if (!profile)
         return 2;
-    }
-    printf("[OK] Device opened (%04x:%04x)\n", UDTV_VID, UDTV_PID);
+    printf("[OK] Device opened (%04x:%04x)\n", profile->vid, profile->pid);
+    if (!fw_path_set)
+        fw_path = profile->bridge_firmware;
 
     it9300_attach(&bridge, usb);
 
@@ -94,7 +75,8 @@ int main(int argc, char **argv)
         else
             printf("[..] No firmware running (r=%d). Loading into RAM...\n", r);
         size_t fw_size = 0;
-        uint8_t *fw = read_file(fw_path, &fw_size);
+        resolve_data_path(fw_path, fw_resolved, sizeof(fw_resolved));
+        uint8_t *fw = read_file(fw_resolved, &fw_size);
         if (!fw) {
             fprintf(stderr, "[ERROR] Firmware could not be read: %s\n", fw_path);
             dtv_usb_close(usb);
@@ -107,7 +89,7 @@ int main(int argc, char **argv)
             return 3;
         }
         printf("[..] Firmware: %s (%zu bytes, format=%s)\n",
-               fw_path, fw_size, fw[0] == 0x01 ? "old" : "scatter");
+               fw_resolved, fw_size, fw[0] == 0x01 ? "old" : "scatter");
         r = it9300_download_firmware(&bridge, fw, fw_size);
         free(fw);
         if (r < 0) {

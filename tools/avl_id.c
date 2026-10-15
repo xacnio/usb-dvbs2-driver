@@ -8,21 +8,9 @@
 #include "dtv_platform.h"
 #include "usb_backend.h"
 #include "it9300.h"
-#include "firmware_verify.h"
+#include "tool_util.h"
 
-#define UDTV_VID 0x048D
-#define UDTV_PID 0xF036
-#define DEFAULT_FW "../firmware/hiremco-it9303.fw"
 #define DEMOD_ADDR 0x14
-
-static uint8_t *read_file(const char *path, size_t *sz) {
-    FILE *f = fopen(path, "rb"); if (!f) return NULL;
-    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
-    if (n <= 0) { fclose(f); return NULL; }
-    uint8_t *b = malloc(n);
-    if (b && fread(b, 1, n, f) != (size_t)n) { free(b); b = NULL; }
-    fclose(f); if (b) *sz = (size_t)n; return b;
-}
 
 /* Read an AVL 32-bit register: write the 24-bit address, read 4 big-endian
  * bytes. */
@@ -40,17 +28,14 @@ static int avl_rd32(it9300 *b, uint32_t reg, uint32_t *out)
 int main(void)
 {
     dtv_usb *usb = NULL; it9300 b;
-    if (dtv_usb_open(&usb, UDTV_VID, UDTV_PID) != 0) { fprintf(stderr,"could not open device\n"); return 2; }
+    const dtv_hardware_profile *profile = open_connected_device(&usb);
+    if (!profile) return 2;
     it9300_attach(&b, usb);
     it9300_identify(&b);
 
-    if (it9300_query_fw_version(&b) != 0) {
-        size_t sz = 0; uint8_t *fw = read_file(DEFAULT_FW, &sz);
-        if (!fw || dtv_firmware_verify(DTV_FIRMWARE_IT9303, fw, sz) != 0 ||
-            it9300_download_firmware(&b, fw, sz) != 0) {
-            fprintf(stderr,"firmware missing or SHA-256 invalid\n"); free(fw); return 3;
-        }
-        free(fw);
+    if (it9300_query_fw_version(&b) != 0 &&
+        load_file_to_bridge(&b, profile->bridge_firmware, 0) != 0) {
+        fprintf(stderr,"firmware missing or SHA-256 invalid\n"); return 3;
     }
     printf("firmware=%d.%d.%d.%d\n", b.fw_ver[0], b.fw_ver[1], b.fw_ver[2], b.fw_ver[3]);
     it9300_bridge_init(&b);

@@ -10,6 +10,7 @@
 enum dtv_hardware_profile_id {
     DTV_HARDWARE_AUTO = 0,
     DTV_HARDWARE_HIREMCO_IT9303_AVL6261_RDA5815M = 1,
+    DTV_HARDWARE_KANKY_IT9303_AVL6261_RDA5815M = 2,
     DTV_HARDWARE_PROFILE_COUNT
 };
 
@@ -39,5 +40,11 @@ const dtv_hardware_profile *dtv_hardware_profile_by_key(const char *key);
 const dtv_hardware_profile *dtv_hardware_profile_at(size_t index);
 size_t dtv_hardware_profile_count(void);
 const char *dtv_hardware_selection_key(int selection);
+
+/* The first profile, in table order, with more than device_index of its
+ * receivers plugged in; the receiver is then dtv_usb_open_index(vid, pid,
+ * device_index). NULL when no profile has that many. */
+const dtv_hardware_profile *dtv_hardware_profile_find_connected(
+    unsigned device_index);
 
 #endif

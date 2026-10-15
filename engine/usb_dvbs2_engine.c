@@ -686,20 +686,11 @@ static const dtv_hardware_profile *select_hardware_profile(
     const char *key, unsigned device_index)
 {
     const dtv_hardware_profile *profile = dtv_hardware_profile_by_key(key);
-    size_t i;
     if (profile)
         return profile;
     if (key && strcmp(key, "auto") != 0)
         return NULL;
-    for (i = 0; i < dtv_hardware_profile_count(); ++i) {
-        size_t count = 0;
-        profile = dtv_hardware_profile_at(i);
-        if (profile &&
-            dtv_usb_list(profile->vid, profile->pid, NULL, 0, &count) == 0 &&
-            count > device_index)
-            return profile;
-    }
-    return NULL;
+    return dtv_hardware_profile_find_connected(device_index);
 }
 
 static int daemon_cold_init(const dtv_hardware_profile *profile,

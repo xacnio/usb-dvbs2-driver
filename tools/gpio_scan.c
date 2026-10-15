@@ -12,24 +12,7 @@
 #include <stdlib.h>
 #include "usb_backend.h"
 #include "it9300.h"
-#include "firmware_verify.h"
-
-#define UDTV_VID 0x048D
-#define UDTV_PID 0xF036
-#define DEFAULT_FW "../firmware/hiremco-it9303.fw"
-
-static uint8_t *read_file(const char *path, size_t *out_size)
-{
-    FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
-    fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
-    if (sz <= 0) { fclose(f); return NULL; }
-    uint8_t *buf = malloc(sz);
-    if (buf && fread(buf, 1, sz, f) != (size_t)sz) { free(buf); buf = NULL; }
-    fclose(f);
-    if (buf) *out_size = (size_t)sz;
-    return buf;
-}
+#include "tool_util.h"
 
 int main(void)
 {
@@ -37,21 +20,17 @@ int main(void)
     it9300 b;
     int r;
 
-    if (dtv_usb_open(&usb, UDTV_VID, UDTV_PID) != 0) {
-        fprintf(stderr, "[ERROR] device could not be opened\n"); return 2;
-    }
+    const dtv_hardware_profile *profile = open_connected_device(&usb);
+    if (!profile)
+        return 2;
     it9300_attach(&b, usb);
     it9300_identify(&b);
     printf("chip_type=0x%04x\n", b.chip_type);
 
-    if (it9300_query_fw_version(&b) != 0) {
-        size_t sz = 0; uint8_t *fw = read_file(DEFAULT_FW, &sz);
-        if (!fw || dtv_firmware_verify(DTV_FIRMWARE_IT9303, fw, sz) != 0 ||
-            it9300_download_firmware(&b, fw, sz) != 0) {
-            fprintf(stderr, "[ERROR] firmware could not be loaded\n"); free(fw);
-            dtv_usb_close(usb); return 3;
-        }
-        free(fw);
+    if (it9300_query_fw_version(&b) != 0 &&
+        load_file_to_bridge(&b, profile->bridge_firmware, 0) != 0) {
+        fprintf(stderr, "[ERROR] firmware could not be loaded\n");
+        dtv_usb_close(usb); return 3;
     }
     printf("firmware=%d.%d.%d.%d\n", b.fw_ver[0], b.fw_ver[1], b.fw_ver[2], b.fw_ver[3]);
     it9300_bridge_init(&b);

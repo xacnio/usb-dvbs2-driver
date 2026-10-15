@@ -10,42 +10,21 @@
 #include <stdlib.h>
 #include "usb_backend.h"
 #include "it9300.h"
-#include "firmware_verify.h"
+#include "tool_util.h"
 
-#define UDTV_VID 0x048D
-#define UDTV_PID 0xF036
-#define DEFAULT_FW "../firmware/hiremco-it9303.fw"
-
-static uint8_t *read_file(const char *path, size_t *out_size)
-{
-    FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
-    fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
-    if (sz <= 0) { fclose(f); return NULL; }
-    uint8_t *buf = malloc(sz);
-    if (buf && fread(buf, 1, sz, f) != (size_t)sz) { free(buf); buf = NULL; }
-    fclose(f);
-    if (buf) *out_size = (size_t)sz;
-    return buf;
-}
-
-static int ensure_firmware(it9300 *b)
+static int ensure_firmware(it9300 *b, const char *path)
 {
     if (it9300_query_fw_version(b) == 0) {
         printf("[OK] Firmware already loaded: %d.%d.%d.%d\n",
                b->fw_ver[0], b->fw_ver[1], b->fw_ver[2], b->fw_ver[3]);
         return 0;
     }
-    size_t sz = 0;
-    uint8_t *fw = read_file(DEFAULT_FW, &sz);
-    if (!fw) { printf("[ERROR] firmware could not be read\n"); return -1; }
-    if (dtv_firmware_verify(DTV_FIRMWARE_IT9303, fw, sz) != 0) {
+    int r = load_file_to_bridge(b, path, 0);
+    if (r == -1) { printf("[ERROR] firmware could not be read\n"); return -1; }
+    if (r == -2) {
         printf("[ERROR] firmware SHA-256 verification failed\n");
-        free(fw);
         return -1;
     }
-    int r = it9300_download_firmware(b, fw, sz);
-    free(fw);
     if (r == 0)
         printf("[OK] Firmware loaded (RAM): %d.%d.%d.%d\n",
                b->fw_ver[0], b->fw_ver[1], b->fw_ver[2], b->fw_ver[3]);
@@ -87,18 +66,16 @@ int main(void)
     it9300 bridge;
     int r;
 
-    r = dtv_usb_open(&usb, UDTV_VID, UDTV_PID);
-    if (r != 0) {
-        fprintf(stderr, "[ERROR] Device could not be opened: %s\n", dtv_usb_strerror(r));
+    const dtv_hardware_profile *profile = open_connected_device(&usb);
+    if (!profile)
         return 2;
-    }
     it9300_attach(&bridge, usb);
 
     it9300_identify(&bridge);
     printf("[OK] chip_type=0x%04x version=0x%02x\n", bridge.chip_type, bridge.chip_version);
 
     /* Kernel order: firmware -> bridge init (TS/EP/I2C) -> demod power-up */
-    if (ensure_firmware(&bridge) != 0) {
+    if (ensure_firmware(&bridge, profile->bridge_firmware) != 0) {
         dtv_usb_close(usb);
         return 5;
     }

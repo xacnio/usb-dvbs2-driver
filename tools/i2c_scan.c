@@ -11,9 +11,7 @@
 #include <stdio.h>
 #include "usb_backend.h"
 #include "it9300.h"
-
-#define UDTV_VID 0x048D
-#define UDTV_PID 0xF036
+#include "tool_util.h"
 
 /* Known candidate chips - 7-bit I2C addresses (sent as addr<<1 in the
  * protocol). */
@@ -36,11 +34,8 @@ int main(void)
     it9300 bridge;
     int r;
 
-    r = dtv_usb_open(&usb, UDTV_VID, UDTV_PID);
-    if (r != 0) {
-        fprintf(stderr, "[ERROR] Device could not be opened: %s\n", dtv_usb_strerror(r));
+    if (!open_connected_device(&usb))
         return 2;
-    }
     it9300_attach(&bridge, usb);
 
     r = it9300_identify(&bridge);

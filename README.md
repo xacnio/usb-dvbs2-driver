@@ -13,21 +13,28 @@ this repository as a `git submodule` and build it with `add_subdirectory`.
 
 ## Supported hardware
 
-The receiver the SDK is developed and tested against:
+Two receivers built on the same parts (IT9303 USB bridge, AVL6261
+DVB-S/S2/S2X demodulator, RDA5815M tuner):
 
-- USB id `048D:F036` (`UDTV`)
-- IT9303 USB bridge
-- AVL6261 DVB-S/S2/S2X demodulator
-- RDA5815M tuner
+| Receiver | USB id | Profile | Status |
+| --- | --- | --- | --- |
+| Hiremco / SuperDTV UDTV (Hiremco Magic USB-A DVB-S2 4K) | `048D:F036` | `hiremco-it9303-avl6261-rda5815m` | developed and tested against |
+| Next Kanky Link USB Bridge 4K | `23E2:5270` | `kanky-link-it9303-avl6261-rda5815m` | new; lock and streaming not yet confirmed |
 
-Other USB receivers that look similar are not guaranteed to work. Only this
-one is supported because only this one has been tested: everything above the
-USB layer is ordinary DVB, the same on any DVB-S2 receiver.
+The Kanky Link has been brought up to *Hardware ready* by a user, with the
+Hiremco firmware; with its own firmware, and with a satellite signal, it has
+not been tried yet. `--profile auto` picks whichever receiver is plugged in.
+
+Other USB receivers that look similar are not guaranteed to work: everything
+above the USB layer is ordinary DVB, the same on any DVB-S2 receiver, but
+only these have been tried.
 
 What is device specific sits in one record in `core/hardware_profile.c`: USB
 id, bridge, demodulator, tuner, firmware names and I²C addresses. A receiver
-built on the same parts is a new row in that table; different silicon needs a
-new driver and its own firmware.
+built on the same parts is a new row in that table (and a line in the udev
+rule, and its firmware in `core/firmware_verify.c`); the daemon, the engine
+and the diagnostic tools all find the receiver through that table. Different
+silicon needs a new driver and its own firmware.
 
 ## Firmware
 
@@ -36,12 +43,20 @@ is uploaded on every start. The files are in `firmware/`, and the daemon and
 the engine read them from `firmware/` beside their executable (or in the
 working directory), under the names the hardware profile gives:
 
-- `hiremco-it9303.fw`: IT9303 USB bridge
-- `hiremco-avl62x1.fw`: AVL6261 demodulator
+| File | Chip | Version | From |
+| --- | --- | --- | --- |
+| `hiremco-it9303.fw` | IT9303 USB bridge | | `HiremcoDTV.apk` |
+| `hiremco-avl62x1.fw` | AVL6261 demodulator | 1.8.28209 | `HiremcoDTV.apk` |
+| `kanky-it9303.fw` | IT9303 USB bridge | | Kanky Link 2.103 APK |
+| `kanky-avl62x1.fw` | AVL6261 demodulator | 1.8.29658 | Kanky Link 2.103 APK |
 
-The files come from the manufacturer's Android application
-(`HiremcoDTV.apk`) as they are; nothing here writes, builds, decodes or
-modifies them, only transfers them to the device in the order the APK does.
+Each receiver gets the firmware of its own manufacturer's Android
+application, as it is. The Kanky Link application carries its firmware in
+`libdvb_usb_phy.so` (arm64-v8a) rather than as files: `kanky-it9303.fw` is
+the `brFirmware_codes` array and `kanky-avl62x1.fw` the `ucAvlPatchData`
+array, copied byte for byte. Nothing here writes, builds, decodes or modifies
+the firmware, only transfers it to the device in the order the application
+does, and every file is checked against its size and SHA-256 before it is.
 Their rights belong to their respective holders; this repository's license
 does not cover them.
 

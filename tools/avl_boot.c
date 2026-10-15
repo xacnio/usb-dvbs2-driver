@@ -7,59 +7,24 @@
 #include "it9300.h"
 #include "avl62x1.h"
 #include "firmware_verify.h"
-
-#define UDTV_VID 0x048d
-#define UDTV_PID 0xf036
-#define BRIDGE_FW "../firmware/hiremco-it9303.fw"
-#define DEMOD_FW  "../firmware/hiremco-avl62x1.fw"
-
-static uint8_t *read_file(const char *path, size_t *size)
-{
-    FILE *file = fopen(path, "rb");
-    if (!file) return NULL;
-    fseek(file, 0, SEEK_END);
-    long length = ftell(file);
-    fseek(file, 0, SEEK_SET);
-    if (length <= 0) { fclose(file); return NULL; }
-    uint8_t *data = malloc((size_t)length);
-    if (!data || fread(data, 1, (size_t)length, file) != (size_t)length) {
-        free(data);
-        data = NULL;
-    }
-    fclose(file);
-    if (data) *size = (size_t)length;
-    return data;
-}
-
-static int ensure_bridge_firmware(it9300 *bridge)
-{
-    if (it9300_query_fw_version(bridge) == 0)
-        return 0;
-    size_t size = 0;
-    uint8_t *firmware = read_file(BRIDGE_FW, &size);
-    if (!firmware) return -1;
-    if (dtv_firmware_verify(DTV_FIRMWARE_IT9303, firmware, size) != 0) {
-        free(firmware);
-        return -2;
-    }
-    int rc = it9300_download_firmware(bridge, firmware, size);
-    free(firmware);
-    return rc;
-}
+#include "tool_util.h"
 
 int main(int argc, char **argv)
 {
-    const char *demod_path = argc > 1 ? argv[1] : DEMOD_FW;
+    const dtv_hardware_profile *profile;
+    const char *demod_path;
+    char demod_resolved[DTV_PATH_MAX];
     dtv_usb *usb = NULL;
     it9300 bridge;
     int result = 1;
 
-    if (dtv_usb_open(&usb, UDTV_VID, UDTV_PID) != 0) {
-        fprintf(stderr, "USB device could not be opened.\n");
+    profile = open_connected_device(&usb);
+    if (!profile)
         return 2;
-    }
+    demod_path = argc > 1 ? argv[1] : profile->demod_firmware;
     if (it9300_attach(&bridge, usb) != 0 || it9300_identify(&bridge) != 0 ||
-        ensure_bridge_firmware(&bridge) != 0) {
+        (it9300_query_fw_version(&bridge) != 0 &&
+         load_file_to_bridge(&bridge, profile->bridge_firmware, 0) != 0)) {
         fprintf(stderr, "IT9303 firmware could not be prepared.\n");
         goto done;
     }
@@ -85,7 +50,8 @@ int main(int argc, char **argv)
     }
 
     size_t patch_size = 0;
-    uint8_t *patch = read_file(demod_path, &patch_size);
+    resolve_data_path(demod_path, demod_resolved, sizeof(demod_resolved));
+    uint8_t *patch = read_file(demod_resolved, &patch_size);
     if (!patch) {
         fprintf(stderr, "Demod firmware could not be opened: %s\n", demod_path);
         goto done;

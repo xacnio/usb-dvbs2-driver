@@ -13,16 +13,12 @@
 #include "dtv_platform.h"
 
 #include "usb_backend.h"
+#include "hardware_profile.h"
 #include "it9300.h"
 #include "avl62x1.h"
 #include "rda5815m.h"
 #include "ts_udp.h"
 #include "tool_util.h"
-
-#define UDTV_VID 0x048d
-#define UDTV_PID 0xf036
-#define BRIDGE_FW "firmware/hiremco-it9303.fw"
-#define DEMOD_FW  "firmware/hiremco-avl62x1.fw"
 
 static int parse_u32(const char *text, uint32_t *value)
 {
@@ -53,20 +49,23 @@ static void print_usage(const char *program)
 static int print_devices(void)
 {
     dtv_usb_device_info devices[32];
-    size_t count = 0;
-    int rc = dtv_usb_list(UDTV_VID, UDTV_PID, devices,
-                          sizeof(devices) / sizeof(devices[0]), &count);
-    if (rc != 0) {
-        fprintf(stderr, "Could not get the USB device list: %s\n",
-                dtv_usb_strerror(rc));
-        return 2;
-    }
-    for (size_t i = 0; i < count && i < sizeof(devices) / sizeof(devices[0]); ++i) {
-        const dtv_usb_device_info *device = &devices[i];
-        printf("DEVICE\t%u\t%u\t%u\t%04x\t%04x\t%s\t%s\t%s\n",
-               device->index, device->bus, device->address,
-               device->vid, device->pid, device->manufacturer,
-               device->product, device->serial);
+    for (size_t p = 0; p < dtv_hardware_profile_count(); ++p) {
+        const dtv_hardware_profile *profile = dtv_hardware_profile_at(p);
+        size_t count = 0;
+        int rc = dtv_usb_list(profile->vid, profile->pid, devices,
+                              sizeof(devices) / sizeof(devices[0]), &count);
+        if (rc != 0) {
+            fprintf(stderr, "Could not get the USB device list: %s\n",
+                    dtv_usb_strerror(rc));
+            return 2;
+        }
+        for (size_t i = 0; i < count && i < sizeof(devices) / sizeof(devices[0]); ++i) {
+            const dtv_usb_device_info *device = &devices[i];
+            printf("DEVICE\t%u\t%u\t%u\t%04x\t%04x\t%s\t%s\t%s\n",
+                   device->index, device->bus, device->address,
+                   device->vid, device->pid, device->manufacturer,
+                   device->product, device->serial);
+        }
     }
     return 0;
 }
@@ -545,6 +544,7 @@ int main(int argc, char **argv)
     setvbuf(stdout, NULL, _IONBF, 0);
     uint32_t live_video_pid = 0x1fffu, live_audio_pid = 0x1fffu;
     uint32_t device_index = 0;
+    const dtv_hardware_profile *profile = NULL;
     int lnb_enabled = 0;
     int rf_profile = 0;
     int diseqc10_given = 0;
@@ -731,14 +731,21 @@ int main(int argc, char **argv)
     }
 
     printf("USB device index: %lu\n", (unsigned long)device_index);
-    if (dtv_usb_open_index(&usb, UDTV_VID, UDTV_PID, device_index) != 0) {
+    profile = dtv_hardware_profile_find_connected(device_index);
+    if (!profile) {
+        fprintf(stderr, "No supported USB device %lu was found. Refresh the device list.\n",
+                (unsigned long)device_index); return 2;
+    }
+    printf("Hardware profile: %s [%04x:%04x]\n", profile->name,
+           profile->vid, profile->pid);
+    if (dtv_usb_open_index(&usb, profile->vid, profile->pid, device_index) != 0) {
         fprintf(stderr, "USB device %lu could not be opened. Refresh the device list.\n",
                 (unsigned long)device_index); return 2;
     }
     if (it9300_attach(&bridge, usb) != 0 || it9300_identify(&bridge) != 0)
         goto done;
     if (it9300_query_fw_version(&bridge) != 0 &&
-        load_file_to_bridge(&bridge, BRIDGE_FW, 0) != 0)
+        load_file_to_bridge(&bridge, profile->bridge_firmware, 0) != 0)
         goto done;
     if (it9300_bridge_init(&bridge) != 0) goto done;
 
@@ -752,7 +759,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "AVL6261 not found: 0x%08lx\n", (unsigned long)chip_id);
         goto done;
     }
-    if (load_file_to_bridge(&bridge, DEMOD_FW, 1) != 0 ||
+    if (load_file_to_bridge(&bridge, profile->demod_firmware, 1) != 0 ||
         avl62x1_wait_ready(&bridge, AVL62X1_I2C_ADDR, 100, 50) != 0) {
         fprintf(stderr, "AVL6261 firmware failed to boot.\n"); goto done;
     }

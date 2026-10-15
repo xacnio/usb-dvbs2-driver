@@ -1,19 +1,18 @@
 /* probe.c - phase 0 USB descriptor dump
  *
- * Opens the Hiremco "UDTV" USB satellite tuner (ITE IT9300 bridge) with
- * libusb and dumps every descriptor, interface and endpoint. This is what
- * determines which bulk endpoints carry command/control and which carry the
- * TS stream, before any driver is written.
+ * Opens the first receiver a hardware profile describes (ITE IT9300 bridge)
+ * with libusb and dumps every descriptor, interface and endpoint. This is
+ * what determines which bulk endpoints carry command/control and which
+ * carry the TS stream, before any driver is written.
  *
- * Prerequisite: the device must be bound to the WinUSB driver with Zadig.
- *   VID:PID = 048D:F036
+ * Prerequisite: on Windows the device must be bound to the WinUSB driver
+ * with Zadig.
  *
  * Building: see CMakeLists.txt (target: usb-dvbs2-usb-probe) */
 #include <stdio.h>
 #include <libusb.h>
 
-#define UDTV_VID 0x048D
-#define UDTV_PID 0xF036
+#include "hardware_profile.h"
 
 static const char *xfer_type(int t)
 {
@@ -70,14 +69,23 @@ int main(void)
         return 1;
     }
 
-    libusb_device_handle *h =
-        libusb_open_device_with_vid_pid(ctx, UDTV_VID, UDTV_PID);
+    libusb_device_handle *h = NULL;
+    for (size_t i = 0; !h && i < dtv_hardware_profile_count(); i++) {
+        const dtv_hardware_profile *profile = dtv_hardware_profile_at(i);
+        h = libusb_open_device_with_vid_pid(ctx, profile->vid, profile->pid);
+        if (h)
+            printf("Hardware profile: %s\n", profile->name);
+    }
     if (!h) {
+        fprintf(stderr, "No supported device could be opened:\n");
+        for (size_t i = 0; i < dtv_hardware_profile_count(); i++) {
+            const dtv_hardware_profile *profile = dtv_hardware_profile_at(i);
+            fprintf(stderr, "    %04x:%04x  %s\n",
+                    profile->vid, profile->pid, profile->name);
+        }
         fprintf(stderr,
-                "Device could not be opened (VID=%04x PID=%04x).\n"
                 "  - Is the device plugged in?\n"
-                "  - Was the WinUSB driver assigned with Zadig?\n",
-                UDTV_VID, UDTV_PID);
+                "  - Was the WinUSB driver assigned with Zadig?\n");
         libusb_exit(ctx);
         return 2;
     }

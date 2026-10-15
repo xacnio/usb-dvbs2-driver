@@ -8,3 +8,6 @@
 
 # UDTV receiver: IT9303 bridge, AVL6261 demodulator, RDA5815M tuner
 SUBSYSTEM=="usb", ATTRS{idVendor}=="048d", ATTRS{idProduct}=="f036", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+
+# Next Kanky Link: IT9303 bridge, AVL6261 demodulator, RDA5815M tuner
+SUBSYSTEM=="usb", ATTRS{idVendor}=="23e2", ATTRS{idProduct}=="5270", MODE="0660", GROUP="plugdev", TAG+="uaccess"

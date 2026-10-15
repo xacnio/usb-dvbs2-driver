@@ -158,11 +158,13 @@ target_link_libraries(usb-dvbs2 PRIVATE usbdvbs2client)
 
 # --- Diagnostic tools for development ---
 add_executable(usb-dvbs2-usb-probe tools/probe.c)
-target_link_libraries(usb-dvbs2-usb-probe PRIVATE libusb)
+target_link_libraries(usb-dvbs2-usb-probe PRIVATE usbdvbs2core)
 usb_dvbs2_copy_libusb(usb-dvbs2-usb-probe)
 
+# The tools find the receiver and its firmware through engine/tool_util.c.
 function(usb_dvbs2_tool target source)
-    add_executable(${target} ${source})
+    add_executable(${target} ${source} engine/tool_util.c)
+    target_include_directories(${target} PRIVATE engine)
     target_link_libraries(${target} PRIVATE usbdvbs2core)
     usb_dvbs2_copy_libusb(${target})
 endfunction()
@@ -227,14 +229,17 @@ if(USB_DVBS2_CAMD)
     add_test(NAME csa COMMAND usb-dvbs2-csa-test)
 endif()
 
-if(EXISTS "${USB_DVBS2_FIRMWARE_DIR}/hiremco-it9303.fw" AND
-   EXISTS "${USB_DVBS2_FIRMWARE_DIR}/hiremco-avl62x1.fw")
-    add_executable(usb-dvbs2-firmware-verify-test tests/firmware_verify_test.c)
-    target_link_libraries(usb-dvbs2-firmware-verify-test PRIVATE usbdvbs2core)
-    add_test(NAME firmware-verify COMMAND usb-dvbs2-firmware-verify-test
-        "${USB_DVBS2_FIRMWARE_DIR}/hiremco-it9303.fw"
-        "${USB_DVBS2_FIRMWARE_DIR}/hiremco-avl62x1.fw")
-endif()
+add_executable(usb-dvbs2-firmware-verify-test tests/firmware_verify_test.c)
+target_link_libraries(usb-dvbs2-firmware-verify-test PRIVATE usbdvbs2core)
+foreach(vendor hiremco kanky)
+    if(EXISTS "${USB_DVBS2_FIRMWARE_DIR}/${vendor}-it9303.fw" AND
+       EXISTS "${USB_DVBS2_FIRMWARE_DIR}/${vendor}-avl62x1.fw")
+        add_test(NAME firmware-verify-${vendor}
+            COMMAND usb-dvbs2-firmware-verify-test
+            "${USB_DVBS2_FIRMWARE_DIR}/${vendor}-it9303.fw"
+            "${USB_DVBS2_FIRMWARE_DIR}/${vendor}-avl62x1.fw")
+    endif()
+endforeach()
 
 # --- Firmware beside the executables ---
 #

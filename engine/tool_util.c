@@ -46,6 +46,29 @@ int resolve_data_path(const char *relative, char *out, size_t size)
     return dtv_file_exists(out) ? 0 : -1;
 }
 
+const dtv_hardware_profile *open_connected_device(dtv_usb **usb)
+{
+    const dtv_hardware_profile *profile =
+        dtv_hardware_profile_find_connected(0);
+    int rc;
+
+    if (!profile) {
+        fprintf(stderr, "No supported USB receiver was found. Is it plugged in?\n");
+        return NULL;
+    }
+    rc = dtv_usb_open(usb, profile->vid, profile->pid);
+    if (rc != 0) {
+        fprintf(stderr, "%s [%04x:%04x] could not be opened: %s\n"
+                        "  On Windows, was the WinUSB driver assigned with Zadig?\n",
+                profile->name, profile->vid, profile->pid,
+                dtv_usb_strerror(rc));
+        return NULL;
+    }
+    printf("Hardware profile: %s [%04x:%04x]\n", profile->name,
+           profile->vid, profile->pid);
+    return profile;
+}
+
 int load_file_to_bridge(it9300 *bridge, const char *path, int demod)
 {
     char resolved[DTV_PATH_MAX];
